@@ -1,0 +1,36 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'uk.co.zfn.zoomclick'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'uk.co.zfn.zoomclick'
+        minSdk 29
+        targetSdk 35
+        versionCode 15
+        versionName '1.14'
+    }
+
+    signingConfigs {
+        zfn {
+            storeFile file('zfn.keystore')
+            storePassword 'android'
+            keyAlias 'zfn'
+            keyPassword 'android'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.zfn
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
