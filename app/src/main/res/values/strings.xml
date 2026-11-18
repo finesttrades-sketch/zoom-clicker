@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ZFN Zoom Clicker</string>
+    <string name="service_desc">Spigen remote: single press takes a photo instantly; a quick double press steps the Samsung camera zoom (3x, then 10x, then 0.6x).</string>
+</resources>
