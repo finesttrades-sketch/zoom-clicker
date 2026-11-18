@@ -1,0 +1,50 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Restore signing key
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+        run: echo "$SIGNING_KEY" | base64 -d > app/zfn.keystore
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ZFN-Zoom-Clicker-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Read version
+        run: |
+          VER=$(grep versionName app/build.gradle | sed -E "s/.*'([^']+)'.*/\1/")
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          cp app/build/outputs/apk/debug/app-debug.apk "ZFN-Zoom-Clicker-$VER.apk"
+
+      - name: Publish release (for Obtainium auto-updates)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VER }}
+          name: ZFN Zoom Clicker ${{ env.VER }}
+          files: ZFN-Zoom-Clicker-${{ env.VER }}.apk
+          make_latest: true
