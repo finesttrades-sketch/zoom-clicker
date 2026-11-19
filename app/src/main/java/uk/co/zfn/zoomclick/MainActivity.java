@@ -31,6 +31,8 @@ public class MainActivity extends Activity {
     static final int DEFAULT_GAP = 250;
     static final int MIN_GAP = 50;
     static final int MAX_GAP = 1000;
+    static final String KEY_TRIPLE = "triple";
+    static final int DEFAULT_TRIPLE = 700;
 
     private TextView log;
     private TextView activity;
@@ -83,6 +85,37 @@ public class MainActivity extends Activity {
         });
         root.addView(save);
         root.addView(gapStatus);
+
+        TextView triLabel = new TextView(this);
+        triLabel.setText("\nTriple-press window (milliseconds)\n"
+                + "After a double press changes the zoom, another press within this time "
+                + "goes straight to 0.6x instead of taking a photo. Allowed: 200 to 2000.");
+        root.addView(triLabel);
+
+        final EditText triBox = new EditText(this);
+        triBox.setInputType(InputType.TYPE_CLASS_NUMBER);
+        triBox.setText(String.valueOf(prefs.getInt(KEY_TRIPLE, DEFAULT_TRIPLE)));
+        root.addView(triBox);
+
+        final TextView triStatus = new TextView(this);
+        triStatus.setText("Current: " + prefs.getInt(KEY_TRIPLE, DEFAULT_TRIPLE) + " ms");
+        Button triSave = new Button(this);
+        triSave.setText("Save");
+        triSave.setOnClickListener(v -> {
+            int value;
+            try {
+                value = Integer.parseInt(triBox.getText().toString().trim());
+            } catch (NumberFormatException e) {
+                triStatus.setText("Please type a number, e.g. 700");
+                return;
+            }
+            value = Math.max(200, Math.min(2000, value));
+            prefs.edit().putInt(KEY_TRIPLE, value).apply();
+            triBox.setText(String.valueOf(value));
+            triStatus.setText("Saved: " + value + " ms (works straight away)");
+        });
+        root.addView(triSave);
+        root.addView(triStatus);
 
         Button access = new Button(this);
         access.setText("Open Accessibility settings");

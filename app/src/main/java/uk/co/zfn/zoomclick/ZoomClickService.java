@@ -75,6 +75,8 @@ public class ZoomClickService extends AccessibilityService {
     private boolean waitingForSecondPress = false;
     private int pressCount = 0;               // presses in the current burst (1, 2 or 3)
     private long burstStartedAt = 0;
+    /** When the last double press (zoom step) happened: a press soon after it = triple. */
+    private long lastDoubleAt = 0;
     private volatile AccessibilityNodeInfo cachedShutter = null;
     private volatile int nextStep = 0;
     private volatile String lastForegroundPackage = "";
@@ -210,21 +212,33 @@ public class ZoomClickService extends AccessibilityService {
         }
 
         swallowUntilUp = true;          // the camera never sees the button itself
+        long now = SystemClock.uptimeMillis();
         handler.removeCallbacks(decide);
+
+        // A press shortly after a double press = triple press: straight to 0.6x.
+        if (lastDoubleAt > 0
+                && now - lastDoubleAt <= pref(MainActivity.KEY_TRIPLE, MainActivity.DEFAULT_TRIPLE)) {
+            ZfnLog.add("triple press (" + (now - lastDoubleAt) + " ms after the double)");
+            lastDoubleAt = 0;
+            waitingForSecondPress = false;
+            pressCount = 0;
+            runLater("0.6x", now, () -> resetToWidest());
+            return true;
+        }
+        lastDoubleAt = 0;
+
         if (waitingForSecondPress) {
-            pressCount++;               // another press in the same burst
-            if (pressCount >= 3) {
-                // triple press: straight back to the widest zoom, no waiting
-                waitingForSecondPress = false;
-                pressCount = 0;
-                ZfnLog.add("triple press");
-                runLater("0.6x", burstStartedAt, () -> resetToWidest());
-            }
+            // second press: change zoom straight away (no more waiting)
+            waitingForSecondPress = false;
+            pressCount = 0;
+            lastDoubleAt = now;
+            ZfnLog.add("double press (" + (now - burstStartedAt) + " ms after the first)");
+            runLater("zoom", now, () -> stepZoom());
         } else {
-            // first press of a burst: single, double or triple? Wait and see (on release).
+            // first press: photo, unless a second press follows within the gap (on release)
             waitingForSecondPress = true;
             pressCount = 1;
-            burstStartedAt = SystemClock.uptimeMillis();
+            burstStartedAt = now;
         }
         return true;
     }
@@ -398,6 +412,10 @@ public class ZoomClickService extends AccessibilityService {
         }
         if (widest.selected) {
             return true;                // already there
+        }
+        if (Math.abs(lastSetZoom - widest.value) < 0.05
+                && SystemClock.uptimeMillis() - lastSetAt < 1500) {
+            return true;                // we only just tapped it (screen not caught up yet)
         }
         if (widest.tap.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
             lastFromZoom = -1;
