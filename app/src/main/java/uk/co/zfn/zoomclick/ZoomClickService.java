@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -30,12 +31,15 @@ import java.util.regex.Pattern;
 /**
  * ZFN Zoom Clicker
  *
- * - Every press of the Spigen remote goes straight to the Samsung camera, untouched,
- *   so the shutter fires instantly (no waiting, no volume bar).
- * - A quick SECOND press (within DOUBLE_PRESS_MS of the previous one) is held back
- *   and instead taps the next zoom button in ZOOM_STEPS.
+ * 1 press = photo, 2 presses = next zoom (0.6x -> 3x -> 10x -> 0.6x), 3 presses = 0.6x.
+ * Outside the Samsung camera the button works as normal.
  *
- * So: single press = photo. Double press = one photo, then next zoom level.
+ * Speed rules (v1.15):
+ * - The button handler never waits for the camera app. Deciding "is the camera in front?"
+ *   uses only the window list, which the system answers instantly.
+ * - The photo is a tap on the shutter's known position, sent straight to the screen.
+ * - Anything that has to read the camera's screen (zoom buttons, finding the shutter)
+ *   runs on a separate worker thread, and is dropped if it would happen too late.
  */
 public class ZoomClickService extends AccessibilityService {
 
@@ -56,31 +60,34 @@ public class ZoomClickService extends AccessibilityService {
     /** What to show on screen after each step. */
     private static final String[] STEP_NAMES = {"3x", "10x", "0.6x"};
 
-    /**
-     * After the button is released, how long to wait for a second press. A single press takes
-     * the photo after this gap; a second press within it changes the zoom (and takes no photo).
-     */
-    private static final long RELEASE_GAP_MS = 250;
-
     /** Only react to buttons from a device whose name contains this. Empty = any device. */
     private static final String REMOTE_NAME_CONTAINS = "Spigen";
 
     /** Samsung Camera app. */
     private static final String CAMERA_PACKAGE = "com.sec.android.app.camera";
 
+    /** A photo or zoom that can't start within this long after the press is dropped. */
+    private static final long TOO_LATE_MS = 1500;
+
     // ------------------------------------------------------------------
 
     private boolean swallowUntilUp = false;
     private boolean waitingForSecondPress = false;
     private int pressCount = 0;               // presses in the current burst (1, 2 or 3)
-    private AccessibilityNodeInfo cachedShutter = null;
-    private int nextStep = 0;
-    private String lastForegroundPackage = "";
-    private Rect lastShutterBounds = null;
-    private double lastFromZoom = -1;
-    private double lastSetZoom = -1;
-    private long lastSetAt = 0;
+    private long burstStartedAt = 0;
+    private volatile AccessibilityNodeInfo cachedShutter = null;
+    private volatile int nextStep = 0;
+    private volatile String lastForegroundPackage = "";
+    private volatile Rect lastShutterBounds = null;
+    private volatile double lastFromZoom = -1;
+    private volatile double lastSetZoom = -1;
+    private volatile long lastSetAt = 0;
+    /** Window ids that belong to the camera, learnt from its own events. */
+    private final List<Integer> cameraWindowIds = new ArrayList<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private HandlerThread workerThread;
+    private Handler worker;
+
     /** Runs a short gap after the last release: decides single (photo) or double (zoom). */
     private final Runnable decide = new Runnable() {
         @Override
@@ -89,16 +96,83 @@ public class ZoomClickService extends AccessibilityService {
             int n = pressCount;
             pressCount = 0;
             if (n == 1) {
-                takePhoto();
+                takePhoto(burstStartedAt);
             } else if (n == 2) {
-                stepZoom();
+                final long pressedAt = burstStartedAt;
+                runLater("zoom", pressedAt, () -> stepZoom());
             }
         }
     };
+
+    /** Re-reads where the shutter button is (worker thread). */
+    private final Runnable refreshShutter = new Runnable() {
+        @Override
+        public void run() {
+            long t = SystemClock.uptimeMillis();
+            for (AccessibilityNodeInfo root : roots()) {
+                AccessibilityNodeInfo shutter = findShutter(root);
+                if (shutter != null) {
+                    Rect r = new Rect();
+                    shutter.getBoundsInScreen(r);
+                    if (r.width() > 0 && r.height() > 0) {
+                        lastShutterBounds = r;
+                        cachedShutter = shutter;
+                    }
+                    break;
+                }
+            }
+            long took = SystemClock.uptimeMillis() - t;
+            if (took > 800) {
+                ZfnLog.add("camera was slow to answer (" + took + " ms) while checking the shutter");
+            }
+        }
+    };
+
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
+        workerThread = new HandlerThread("zfn-worker");
+        workerThread.start();
+        worker = new Handler(workerThread.getLooper());
+        ZfnLog.add("service started");
         Toast.makeText(this, "ZFN Zoom Clicker is on", Toast.LENGTH_SHORT).show();
+    }
+
+    @Override
+    public void onDestroy() {
+        if (workerThread != null) {
+            workerThread.quitSafely();
+        }
+        super.onDestroy();
+    }
+
+    /** Run a job on the worker thread, unless it would start too long after the press. */
+    private void runLater(final String what, final long pressedAt, final Runnable job) {
+        if (worker == null) {
+            return;
+        }
+        worker.post(() -> {
+            long late = SystemClock.uptimeMillis() - pressedAt;
+            if (late > TOO_LATE_MS) {
+                ZfnLog.add(what + " dropped: it would have happened " + late + " ms after the press");
+                return;
+            }
+            long t = SystemClock.uptimeMillis();
+            try {
+                job.run();
+            } catch (Exception e) {
+                ZfnLog.add(what + " failed: " + e.getClass().getSimpleName());
+            }
+            long took = SystemClock.uptimeMillis() - t;
+            ZfnLog.add(what + " done in " + took + " ms" + (took > 800 ? "  <- camera slow" : ""));
+        });
+    }
+
+    private void scheduleShutterRefresh(long delayMs) {
+        if (worker != null) {
+            worker.removeCallbacks(refreshShutter);
+            worker.postDelayed(refreshShutter, delayMs);
+        }
     }
 
     @Override
@@ -131,6 +205,7 @@ public class ZoomClickService extends AccessibilityService {
             return swallowUntilUp;      // button held down: ignore the repeats
         }
         if (!cameraInFront()) {
+            ZfnLog.add("press ignored: camera not in front (on screen: " + topAppWindowTitle() + ")");
             return false;               // outside the camera the button works as normal
         }
 
@@ -142,12 +217,14 @@ public class ZoomClickService extends AccessibilityService {
                 // triple press: straight back to the widest zoom, no waiting
                 waitingForSecondPress = false;
                 pressCount = 0;
-                resetToWidest();
+                ZfnLog.add("triple press");
+                runLater("0.6x", burstStartedAt, () -> resetToWidest());
             }
         } else {
             // first press of a burst: single, double or triple? Wait and see (on release).
             waitingForSecondPress = true;
             pressCount = 1;
+            burstStartedAt = SystemClock.uptimeMillis();
         }
         return true;
     }
@@ -161,41 +238,44 @@ public class ZoomClickService extends AccessibilityService {
         }
     }
 
-    /** Take a photo by tapping the camera's own shutter button. */
-    private void takePhoto() {
-        // quickest: the shutter button we found last time
-        if (cachedShutter != null) {
-            try {
-                if (cachedShutter.refresh() && cachedShutter.isVisibleToUser()
-                        && cachedShutter.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    return;
-                }
-            } catch (Exception ignored) {
-                // stale: search again below
+    /**
+     * Take a photo. Fast way: tap the shutter's known position straight on the screen
+     * (doesn't wait for the camera app at all). If we don't know where it is yet, find it
+     * on the worker thread.
+     */
+    private void takePhoto(final long pressedAt) {
+        Rect r = lastShutterBounds;
+        if (r != null) {
+            if (!cameraInFront()) {
+                ZfnLog.add("photo cancelled: camera no longer in front");
+                return;
             }
-            cachedShutter = null;
+            tapAt(r.centerX(), r.centerY());
+            ZfnLog.add("photo: shutter tapped " + (SystemClock.uptimeMillis() - pressedAt) + " ms after press");
+            return;
         }
-        for (AccessibilityNodeInfo root : roots()) {
-            AccessibilityNodeInfo shutter = findShutter(root);
-            if (shutter != null) {
-                Rect r = new Rect();
-                shutter.getBoundsInScreen(r);
-                lastShutterBounds = r;
-                cachedShutter = shutter;
-                if (shutter.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    return;
-                }
+        runLater("photo (first, finding shutter)", pressedAt, () -> {
+            refreshShutter.run();
+            AccessibilityNodeInfo s = cachedShutter;
+            if (s != null && s.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                return;
             }
-        }
-        // fallback: tap where the shutter button was last seen
-        if (lastShutterBounds != null) {
-            Path path = new Path();
-            path.moveTo(lastShutterBounds.centerX(), lastShutterBounds.centerY());
-            GestureDescription tap = new GestureDescription.Builder()
-                    .addStroke(new GestureDescription.StrokeDescription(path, 0, 60))
-                    .build();
-            dispatchGesture(tap, null, null);
-        }
+            Rect b = lastShutterBounds;
+            if (b != null) {
+                tapAt(b.centerX(), b.centerY());
+            } else {
+                ZfnLog.add("photo: couldn't find the shutter button");
+            }
+        });
+    }
+
+    private void tapAt(int x, int y) {
+        Path path = new Path();
+        path.moveTo(x, y);
+        GestureDescription tap = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 50))
+                .build();
+        dispatchGesture(tap, null, null);
     }
 
     private AccessibilityNodeInfo findShutter(AccessibilityNodeInfo node) {
@@ -231,25 +311,57 @@ public class ZoomClickService extends AccessibilityService {
         return device.getName().toLowerCase().contains(REMOTE_NAME_CONTAINS.toLowerCase());
     }
 
-    private boolean cameraInFront() {
+    /** The app window currently on top (from the system's window list: instant). */
+    private AccessibilityWindowInfo topAppWindow() {
         try {
+            AccessibilityWindowInfo first = null;
             for (AccessibilityWindowInfo w : getWindows()) {
                 if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) {
                     continue;
                 }
-                AccessibilityNodeInfo r = w.getRoot();
-                if (r != null && r.getPackageName() != null
-                        && CAMERA_PACKAGE.contentEquals(r.getPackageName())) {
-                    return true;
+                if (w.isActive() || w.isFocused()) {
+                    return w;
+                }
+                if (first == null) {
+                    first = w;
                 }
             }
-        } catch (Exception ignored) {
-            // fall through to the simpler checks
+            return first;
+        } catch (Exception e) {
+            return null;
         }
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root != null && root.getPackageName() != null
-                && CAMERA_PACKAGE.contentEquals(root.getPackageName())) {
+    }
+
+    private String topAppWindowTitle() {
+        AccessibilityWindowInfo w = topAppWindow();
+        if (w == null) {
+            return "?";
+        }
+        CharSequence t = w.getTitle();
+        return t == null ? "untitled window" : t.toString();
+    }
+
+    private boolean isCameraWindow(AccessibilityWindowInfo w) {
+        if (w == null) {
+            return false;
+        }
+        CharSequence t = w.getTitle();
+        if (t != null && t.toString().toLowerCase().contains("camera")) {
             return true;
+        }
+        synchronized (cameraWindowIds) {
+            return cameraWindowIds.contains(w.getId()) && CAMERA_PACKAGE.equals(lastForegroundPackage);
+        }
+    }
+
+    /**
+     * Is the Samsung camera on screen? Uses only the window list (no questions to the camera
+     * app), so it answers instantly even while the camera is busy saving a photo.
+     */
+    private boolean cameraInFront() {
+        AccessibilityWindowInfo top = topAppWindow();
+        if (top != null) {
+            return isCameraWindow(top);
         }
         return CAMERA_PACKAGE.equals(lastForegroundPackage);
     }
@@ -292,6 +404,7 @@ public class ZoomClickService extends AccessibilityService {
             lastSetZoom = widest.value;
             lastSetAt = SystemClock.uptimeMillis();
             nextStep = 0;
+            ZfnLog.add("zoom -> " + widest.value + "x");
             return true;
         }
         return false;
@@ -352,6 +465,7 @@ public class ZoomClickService extends AccessibilityService {
             lastFromZoom = now;
             lastSetZoom = pick.value;
             lastSetAt = SystemClock.uptimeMillis();
+            ZfnLog.add("zoom " + now + "x -> " + pick.value + "x");
             return;
         }
 
@@ -665,21 +779,28 @@ public class ZoomClickService extends AccessibilityService {
         return r.width() < dm.widthPixels / 2 && r.height() < dm.heightPixels / 6;
     }
 
+    /** Root of every camera window (worker thread only: these ask the camera app). */
     private List<AccessibilityNodeInfo> roots() {
         List<AccessibilityNodeInfo> list = new ArrayList<>();
-        AccessibilityNodeInfo active = getRootInActiveWindow();
-        if (active != null) {
-            list.add(active);
-        }
         try {
             for (AccessibilityWindowInfo w : getWindows()) {
+                if (w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION || !isCameraWindow(w)) {
+                    continue;
+                }
                 AccessibilityNodeInfo r = w.getRoot();
                 if (r != null) {
                     list.add(r);
                 }
             }
         } catch (Exception ignored) {
-            // fall back to the active window only
+            // fall back to the active window below
+        }
+        if (list.isEmpty()) {
+            AccessibilityNodeInfo active = getRootInActiveWindow();
+            if (active != null && active.getPackageName() != null
+                    && CAMERA_PACKAGE.contentEquals(active.getPackageName())) {
+                list.add(active);
+            }
         }
         return list;
     }
@@ -706,7 +827,7 @@ public class ZoomClickService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        if (event == null) {
             return;
         }
         CharSequence pkg = event.getPackageName();
@@ -714,13 +835,36 @@ public class ZoomClickService extends AccessibilityService {
             return;
         }
         String p = pkg.toString();
+        boolean camera = p.equals(CAMERA_PACKAGE);
+        if (camera) {
+            int id = event.getWindowId();
+            if (id >= 0) {
+                synchronized (cameraWindowIds) {
+                    if (!cameraWindowIds.contains(id)) {
+                        cameraWindowIds.add(id);
+                        while (cameraWindowIds.size() > 20) {
+                            cameraWindowIds.remove(0);
+                        }
+                    }
+                }
+            }
+        }
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            return;
+        }
         CharSequence cls = event.getClassName();
         if (p.equals("com.android.systemui") || p.equals(getPackageName())
                 || (cls != null && cls.toString().contains("Toast"))) {
-            return;   // ignore pop-ups (volume bar, our own "Zoom 3x" message, etc.)
+            return;   // ignore pop-ups (volume bar, toasts, etc.)
         }
-        if (p.equals(CAMERA_PACKAGE) && !p.equals(lastForegroundPackage)) {
-            nextStep = 0;   // camera just opened: start the zoom cycle from 3x again
+        if (camera) {
+            if (!p.equals(lastForegroundPackage)) {
+                nextStep = 0;   // camera just opened: start the zoom cycle from 3x again
+                ZfnLog.add("camera opened");
+            }
+            scheduleShutterRefresh(700);   // re-check where the shutter is
+        } else if (CAMERA_PACKAGE.equals(lastForegroundPackage)) {
+            ZfnLog.add("left the camera (now: " + p + ")");
         }
         lastForegroundPackage = p;
     }

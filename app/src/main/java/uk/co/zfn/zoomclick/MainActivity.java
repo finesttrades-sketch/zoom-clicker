@@ -1,6 +1,8 @@
 package uk.co.zfn.zoomclick;
 
 import android.app.Activity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
@@ -31,6 +33,7 @@ public class MainActivity extends Activity {
     static final int MAX_GAP = 1000;
 
     private TextView log;
+    private TextView activity;
     private final List<String> lines = new ArrayList<>();
     private long lastDownAt = 0;
     private long lastEventAt = 0;
@@ -86,6 +89,34 @@ public class MainActivity extends Activity {
         access.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(access);
 
+        TextView actTitle = new TextView(this);
+        actTitle.setText("\nRecent activity (newest first)");
+        actTitle.setTextSize(16);
+        root.addView(actTitle);
+
+        LinearLayout actButtons = new LinearLayout(this);
+        actButtons.setOrientation(LinearLayout.HORIZONTAL);
+        Button refresh = new Button(this);
+        refresh.setText("Refresh");
+        refresh.setOnClickListener(v -> activity.setText(ZfnLog.all()));
+        actButtons.addView(refresh);
+        Button copy = new Button(this);
+        copy.setText("Copy log");
+        copy.setOnClickListener(v -> {
+            ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            cm.setPrimaryClip(ClipData.newPlainText("ZFN log", ZfnLog.all()));
+            refresh.setText("Refresh");
+            copy.setText("Copied");
+        });
+        actButtons.addView(copy);
+        root.addView(actButtons);
+
+        activity = new TextView(this);
+        activity.setTextSize(13);
+        activity.setTextIsSelectable(true);
+        activity.setText(ZfnLog.all());
+        root.addView(activity);
+
         TextView testTitle = new TextView(this);
         testTitle.setText("\nButton tester: press the Spigen button here to see what it sends.");
         testTitle.setTextSize(16);
@@ -99,6 +130,14 @@ public class MainActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         scroll.addView(root);
         setContentView(scroll);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (activity != null) {
+            activity.setText(ZfnLog.all());
+        }
     }
 
     @Override
