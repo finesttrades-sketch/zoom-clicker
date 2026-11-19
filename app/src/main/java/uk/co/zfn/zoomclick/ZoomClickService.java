@@ -89,6 +89,48 @@ public class ZoomClickService extends AccessibilityService {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private HandlerThread workerThread;
     private Handler worker;
+    /** Big zoom label over the camera, and its own background thread (so it never slows a press). */
+    private ZoomLabel label;
+    private HandlerThread labelThread;
+    private Handler labelWorker;
+    private volatile long trustOwnZoomUntil = 0;
+    private volatile String labelText = "";
+
+    /** Every 0.8 s while running: show/hide the label and read which zoom is selected. */
+    private final Runnable labelTick = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                if (!prefBool(MainActivity.KEY_LABEL, true) || !cameraInFront()) {
+                    handler.post(() -> {
+                        if (label != null) {
+                            label.hide();
+                        }
+                    });
+                    return;
+                }
+                if (SystemClock.uptimeMillis() > trustOwnZoomUntil) {
+                    double z = readSelectedZoom();
+                    if (z > 0) {
+                        labelText = ZoomLabel.format(z);
+                    }
+                }
+                final String text = labelText.isEmpty() ? "?" : labelText;
+                handler.post(() -> {
+                    if (label != null) {
+                        label.show(text, lastShutterBounds);
+                    }
+                });
+            } catch (Exception ignored) {
+                // try again next tick
+            } finally {
+                if (labelWorker != null) {
+                    labelWorker.removeCallbacks(this);
+                    labelWorker.postDelayed(this, 800);
+                }
+            }
+        }
+    };
 
     /** Runs a short gap after the last release: decides single (photo) or double (zoom). */
     private final Runnable decide = new Runnable() {
@@ -136,6 +178,11 @@ public class ZoomClickService extends AccessibilityService {
         workerThread = new HandlerThread("zfn-worker");
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
+        label = new ZoomLabel(this);
+        labelThread = new HandlerThread("zfn-label");
+        labelThread.start();
+        labelWorker = new Handler(labelThread.getLooper());
+        labelWorker.post(labelTick);
         ZfnLog.add("service started");
         Toast.makeText(this, "ZFN Zoom Clicker is on", Toast.LENGTH_SHORT).show();
     }
@@ -144,6 +191,13 @@ public class ZoomClickService extends AccessibilityService {
     public void onDestroy() {
         if (workerThread != null) {
             workerThread.quitSafely();
+        }
+        if (labelThread != null) {
+            labelThread.quitSafely();
+            labelWorker = null;
+        }
+        if (label != null) {
+            label.hide();
         }
         super.onDestroy();
     }
@@ -250,6 +304,82 @@ public class ZoomClickService extends AccessibilityService {
         } catch (Exception e) {
             return fallback;
         }
+    }
+
+    private boolean prefBool(String key, boolean fallback) {
+        try {
+            return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).getBoolean(key, fallback);
+        } catch (Exception e) {
+            return fallback;
+        }
+    }
+
+    /** We just changed the zoom ourselves: show it on the label straight away. */
+    private void showZoomNow(double value) {
+        labelText = ZoomLabel.format(value);
+        trustOwnZoomUntil = SystemClock.uptimeMillis() + 1500;   // screen may lag behind
+        final String text = labelText;
+        handler.post(() -> {
+            if (label != null && prefBool(MainActivity.KEY_LABEL, true)) {
+                label.show(text, lastShutterBounds);
+            }
+        });
+    }
+
+    /** Check the label again soon (after a tap on the camera's own zoom buttons). */
+    private void refreshLabelSoon() {
+        Handler h = labelWorker;
+        if (h != null) {
+            h.removeCallbacks(labelTick);
+            h.postDelayed(labelTick, 150);
+        }
+    }
+
+    /** Which zoom button is selected right now (label thread). One quick question to the camera. */
+    private double readSelectedZoom() {
+        String id = CAMERA_PACKAGE + ":id/zoom_lens_text_button_main";
+        for (AccessibilityNodeInfo root : roots()) {
+            List<AccessibilityNodeInfo> buttons = root.findAccessibilityNodeInfosByViewId(id);
+            if (buttons == null || buttons.isEmpty()) {
+                continue;
+            }
+            AccessibilityNodeInfo pick = null;
+            for (AccessibilityNodeInfo b : buttons) {
+                if (b.isSelected()) {
+                    pick = b;
+                    break;
+                }
+            }
+            if (pick == null) {
+                outer:
+                for (AccessibilityNodeInfo b : buttons) {
+                    for (int i = 0; i < b.getChildCount(); i++) {
+                        AccessibilityNodeInfo c = b.getChild(i);
+                        if (c != null && c.isSelected()) {
+                            pick = b;
+                            break outer;
+                        }
+                    }
+                }
+            }
+            if (pick != null) {
+                CharSequence d = pick.getContentDescription();
+                if (d == null) {
+                    d = pick.getText();
+                }
+                if (d != null) {
+                    Matcher m = NUMBER.matcher(d);
+                    if (m.find()) {
+                        try {
+                            return Double.parseDouble(m.group(1));
+                        } catch (NumberFormatException ignored) {
+                            // keep looking
+                        }
+                    }
+                }
+            }
+        }
+        return -1;
     }
 
     /**
@@ -411,6 +541,7 @@ public class ZoomClickService extends AccessibilityService {
             return false;
         }
         if (widest.selected) {
+            showZoomNow(widest.value);
             return true;                // already there
         }
         if (Math.abs(lastSetZoom - widest.value) < 0.05
@@ -423,6 +554,7 @@ public class ZoomClickService extends AccessibilityService {
             lastSetAt = SystemClock.uptimeMillis();
             nextStep = 0;
             ZfnLog.add("zoom -> " + widest.value + "x");
+            showZoomNow(widest.value);
             return true;
         }
         return false;
@@ -484,6 +616,7 @@ public class ZoomClickService extends AccessibilityService {
             lastSetZoom = pick.value;
             lastSetAt = SystemClock.uptimeMillis();
             ZfnLog.add("zoom " + now + "x -> " + pick.value + "x");
+            showZoomNow(pick.value);
             return;
         }
 
@@ -867,7 +1000,12 @@ public class ZoomClickService extends AccessibilityService {
                 }
             }
         }
-        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        int type = event.getEventType();
+        if (camera && (type == AccessibilityEvent.TYPE_VIEW_CLICKED
+                || type == AccessibilityEvent.TYPE_VIEW_SELECTED)) {
+            refreshLabelSoon();     // maybe a tap on the camera's own zoom buttons
+        }
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             return;
         }
         CharSequence cls = event.getClassName();
@@ -881,8 +1019,10 @@ public class ZoomClickService extends AccessibilityService {
                 ZfnLog.add("camera opened");
             }
             scheduleShutterRefresh(700);   // re-check where the shutter is
+            refreshLabelSoon();
         } else if (CAMERA_PACKAGE.equals(lastForegroundPackage)) {
             ZfnLog.add("left the camera (now: " + p + ")");
+            refreshLabelSoon();
         }
         lastForegroundPackage = p;
     }

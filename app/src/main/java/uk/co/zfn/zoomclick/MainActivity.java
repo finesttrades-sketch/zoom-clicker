@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
     static final int MAX_GAP = 1000;
     static final String KEY_TRIPLE = "triple";
     static final int DEFAULT_TRIPLE = 700;
+    static final String KEY_LABEL = "label";
 
     private TextView log;
     private TextView activity;
@@ -116,6 +117,16 @@ public class MainActivity extends Activity {
         });
         root.addView(triSave);
         root.addView(triStatus);
+
+        final Button labelToggle = new Button(this);
+        labelToggle.setText(prefs.getBoolean(KEY_LABEL, true)
+                ? "Big zoom label on camera: ON" : "Big zoom label on camera: OFF");
+        labelToggle.setOnClickListener(v -> {
+            boolean on = !prefs.getBoolean(KEY_LABEL, true);
+            prefs.edit().putBoolean(KEY_LABEL, on).apply();
+            labelToggle.setText(on ? "Big zoom label on camera: ON" : "Big zoom label on camera: OFF");
+        });
+        root.addView(labelToggle);
 
         Button access = new Button(this);
         access.setText("Open Accessibility settings");
