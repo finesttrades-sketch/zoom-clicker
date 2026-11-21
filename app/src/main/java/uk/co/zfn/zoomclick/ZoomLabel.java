@@ -7,21 +7,20 @@ import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
-import android.view.OrientationEventListener;
 import android.view.WindowManager;
 import android.widget.TextView;
 
 /**
  * Big zoom label shown over the camera's round shutter button, e.g. "3×".
- * It can't be touched (taps go straight through to the camera), it never appears in photos,
- * and it turns with the phone so it stays upright in landscape. Main thread only.
+ * It can't be touched (taps go straight through to the camera) and it never appears in photos.
+ * In landscape the whole screen turns, so the label stays upright and follows the shutter.
+ * Main thread only.
  */
 final class ZoomLabel {
     private final Context context;
     private final WindowManager wm;
     private TextView view;
     private boolean shown = false;
-    private OrientationEventListener tilt;
     private WindowManager.LayoutParams lp;
 
     ZoomLabel(Context context) {
@@ -62,9 +61,6 @@ final class ZoomLabel {
                 wm.addView(view, want);
                 lp = want;
                 shown = true;
-                if (tilt != null && tilt.canDetectOrientation()) {
-                    tilt.enable();
-                }
             } else if (lp == null || lp.x != want.x || lp.y != want.y || lp.gravity != want.gravity) {
                 wm.updateViewLayout(view, want);
                 lp = want;
@@ -83,9 +79,6 @@ final class ZoomLabel {
             }
         }
         shown = false;
-        if (tilt != null) {
-            tilt.disable();
-        }
     }
 
     private void create() {
@@ -99,16 +92,6 @@ final class ZoomLabel {
         bg.setColor(Color.argb(170, 0, 0, 0));
         bg.setShape(GradientDrawable.OVAL);   // round, like the shutter button
         view.setBackground(bg);
-        tilt = new OrientationEventListener(context) {
-            @Override
-            public void onOrientationChanged(int degrees) {
-                if (degrees == ORIENTATION_UNKNOWN || view == null) {
-                    return;
-                }
-                int snap = ((degrees + 45) / 90 % 4) * 90;   // 0, 90, 180 or 270
-                view.setRotation(-snap);
-            }
-        };
     }
 
     /** "0.6×", "3×", "10×", "2.4×". */

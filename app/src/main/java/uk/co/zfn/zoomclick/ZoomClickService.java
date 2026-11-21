@@ -81,6 +81,8 @@ public class ZoomClickService extends AccessibilityService {
     private volatile int nextStep = 0;
     private volatile String lastForegroundPackage = "";
     private volatile Rect lastShutterBounds = null;
+    /** Screen rotation when lastShutterBounds was read (the shutter moves in landscape). */
+    private volatile int shutterRotation = -1;
     private volatile double lastFromZoom = -1;
     private volatile double lastSetZoom = -1;
     private volatile long lastSetAt = 0;
@@ -108,6 +110,9 @@ public class ZoomClickService extends AccessibilityService {
                         }
                     });
                     return;
+                }
+                if (screenRotation() != shutterRotation) {
+                    refreshShutter.run();    // phone turned: find the shutter in its new place
                 }
                 if (SystemClock.uptimeMillis() > trustOwnZoomUntil) {
                     double z = readSelectedZoom();
@@ -160,6 +165,7 @@ public class ZoomClickService extends AccessibilityService {
                     shutter.getBoundsInScreen(r);
                     if (r.width() > 0 && r.height() > 0) {
                         lastShutterBounds = r;
+                        shutterRotation = screenRotation();
                         cachedShutter = shutter;
                     }
                     break;
@@ -306,6 +312,16 @@ public class ZoomClickService extends AccessibilityService {
         }
     }
 
+    /** 0, 1, 2 or 3 (quarter turns). Instant: no questions to the camera app. */
+    private int screenRotation() {
+        try {
+            android.view.WindowManager wm = (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
+            return wm.getDefaultDisplay().getRotation();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     private boolean prefBool(String key, boolean fallback) {
         try {
             return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).getBoolean(key, fallback);
@@ -389,7 +405,7 @@ public class ZoomClickService extends AccessibilityService {
      */
     private void takePhoto(final long pressedAt) {
         Rect r = lastShutterBounds;
-        if (r != null) {
+        if (r != null && shutterRotation == screenRotation()) {
             if (!cameraInFront()) {
                 ZfnLog.add("photo cancelled: camera no longer in front");
                 return;
